@@ -1,3 +1,5 @@
+from models.jobs import AddPayload
+
 class AdditionHandler:
-    def execute(self, a: int, b: int) -> dict:
-        return {"sum": a + b}
+    def execute(self, payload: AddPayload) -> dict:
+        return {"sum": payload.a + payload.b}

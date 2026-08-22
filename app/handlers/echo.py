@@ -1,3 +1,5 @@
+from models.jobs import EchoPayload
+
 class EchoHandler:
-    def execute(self, message: str) -> dict:
-        return {"message": message}
+    def execute(self, payload: EchoPayload) -> dict:
+        return {"message": payload.message}
