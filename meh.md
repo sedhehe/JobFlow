@@ -1,3 +1,4 @@
+22/08/2026
 first when payload is recieved via /jobs, the incoming payload is validated via pydantic in models/jobs.py checking JobsPayload
 JobsPayload checks what type of payload it is via discriminator
 the payload builds up in a nested validation from the outside in. 
@@ -40,20 +41,85 @@ storage   → "Where do I keep the data?"
 main.py   → "How does the outside world talk to my application?"
 
 jobflow/
-│
-├── main.py
-│
-├── models/
-│   └── jobs.py
-│
-├── handlers/
-│   ├── echo.py
-│   ├── addition.py
-│   └── registry.py
-│
-├── services/
-│   └── job_service.py
-│
-└── storage/
-    └── jobs.py
+└──app/
+    ├── main.py
+    │
+    ├── models/
+    │   └── jobs.py
+    │
+    ├── handlers/
+    │   ├── echo.py
+    │   ├── addition.py
+    │   └── registry.py
+    │
+    ├── services/
+    │   └── job_service.py
+    │
+    └── storage/
+        └── jobs.py
+    
 
+23/08/2026
+introduced /database, responsible for database, tables stuff.
+database/connection.py creates connection with my postgres db hosted on my hardware.
+database/models.py defines the schema of the tables i want to create.
+database/alembic creates migrations for the tables.
+
+models/jobs.py                                 database/models.py
+       │                                               │
+       └── "Is this API data valid?"                   └── "How should this data be stored?"
+
+why alembic?
+Alembic is a migration tool for SQLAlchemy. It is used to manage database migrations, which are changes to the database schema that are tracked over time.
+with the help of alembic, for every table change we don't have to manually alter the table schem or drop tables and lose all data. instead we just update the models and alembic will create a migration file for us which we can run to update the table schema.
+setup - first alembic init alembic
+then in alembic/env.py update "target_metadata" with our metadata which is defined in database/models.py
+paste db link in alembic.ini file
+check with alembic check
+now for every table change, just update the models and run alembic revision --autogenerate -m "<upgrade_message>" and then alembic upgrade head
+
+our table:
+              jobs
+        ┌──────────────────────────┐
+        │ id          UUID         │
+        │ type        VARCHAR      │
+        │ status      ENUM         │
+        │ payload     JSONB        │
+        │ result      JSONB        │
+        │ created_at  TIMESTAMP    │
+        │ updated_at  TIMESTAMP    │
+        └──────────────────────────┘
+
+The process now:
+                 HTTP REQUEST
+                      │
+                      ▼
+             ┌─────────────────┐
+             │ Pydantic Models  │
+             │ models/jobs.py   │
+             └────────┬────────┘
+                      │
+                      │ validated Python data
+                      ▼
+             ┌─────────────────┐
+             │    Service      │
+             │ job_service.py  │
+             └────────┬────────┘
+                      │
+                      ▼
+             ┌─────────────────┐
+             │   Repository    │
+             │ job_repository  │
+             └────────┬────────┘
+                      │
+                      ▼
+             ┌─────────────────┐
+             │ SQLAlchemy Model │
+             │ database/models  │
+             └────────┬────────┘
+                      │
+                      ▼
+             ┌─────────────────┐
+             │   PostgreSQL    │
+             │   jobs table    │
+             └─────────────────┘
