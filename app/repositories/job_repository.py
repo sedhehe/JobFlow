@@ -19,7 +19,7 @@ class JobRepository:
         return job
 
     def get_all_jobs(self):
-        return self.db.query(Job).all()
+        return self.db.query(Job).order_by(Job.created_at.desc()).all()
 
     def update(self, job:Job):
         self.db.commit()
