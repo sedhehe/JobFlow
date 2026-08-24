@@ -4,11 +4,9 @@ from uuid import UUID
 from sqlalchemy import UUID as SQLUUID
 from sqlalchemy import VARCHAR, Enum as SQLEnum, DateTime, func
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column
 
-
-class Base(DeclarativeBase):
-    pass
+from database.connection import Base
 
 
 class JobStatus(Enum):

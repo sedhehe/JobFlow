@@ -123,3 +123,54 @@ The process now:
              │   PostgreSQL    │
              │   jobs table    │
              └─────────────────┘
+
+24/08/2026
+creating job_repository, was writing the "get_job_by_id" function to get the job from table by id, there a question i got, self.db.get(Job, job_id) is taking Job which is imported from databaase/models. How is that linked to or helpful to search the right table?
+ans: Job is a Python class, but it is linked to the PostgreSQL table jobs (__tablename__ = "jobs").
+     When you pass Job to SQLAlchemy, it automatically generates SQL for the jobs table:
+     self.db.get(Job, job_id) translates to SELECT * FROM jobs WHERE id = <job_id>;
+     self.db.query(Job).all() translates to SELECT * FROM jobs;
+    
+damn okay, SQLAlchemy is really alchemy, when the fetched job is modified self.db.commit() automatically writes the UPDATE SQL to PostgreSQL!
+
+Now connecting FastAPI and repository.
+
+When User A and User B send requests at the exact same time, FastAPI runs get_db() independently for each of them.
+User A gets Session 1
+User B gets Session 2
+They are completely isolated in PostgreSQL and do not interfere with each other.
+this is to prevent: Broken Transactions (Atomicity).
+eg: if user A and user B are in same session and user A's job fails in between then both jobs are rolled back and user b's job is not completed. user A's job fails and user B's job is not completed successfully.
+that's why we create a session using FastAPI get_db() to create independent sessions for each request.
+
+current flow:
+Incoming HTTP Request (JSON)
+        ↓
+Pydantic Model (JobsPayload)  ← validates request data
+        ↓
+SQLAlchemy Model (Job)        ← translated into database row
+        ↓
+JobRepository (create / get)  ← saves/reads from PostgreSQL
+        ↓
+Pydantic Model (JobsResponse) ← formats output sent back to client
+
+in main.py i.e. our FastAPI, we now wait for the endpoint to get db connection using Depends(get_db) (get_db from database/connection.py) and store the result in db of type Session becuase we are craeting a session, until we get something nothing is done.
+after we get db from get_db we instantiate job_repository using JobRepository(db) saying, here is the db object (session) and now do your operations.
+
+okay, so the flow is like this:
+first endpoint method is called
+sees it needs the db which is of type JobRepo
+goes to JobRepo which is of type JobRepository and sees it needs to call get_job_repo
+calls get_job_repo which needs db of type sessiong and calls get_db
+once we get db we pass it to JobRepo, and JobRepo goes to create_job, see repo.create and writes into db and closes
+
+now in services/job_service.py takes in the repo and gets the job by id using repo.get_job_by_id(job_id).
+The payload coming from the database is a raw Python dictionary (`job.payload = {"message": "hello"}`), but our handlers expect a Pydantic model so they can access attributes via dot notation (`payload.message`).
+To keep handlers flexible (Open-Closed Principle), each handler now defines its own `payload_schema` class attribute (e.g. `EchoHandler.payload_schema = EchoPayload`).
+In `job_service.py`, we convert the dictionary using dictionary unpacking `**`:
+`payload = handler.payload_schema(**job.payload)`
+The `**` operator "unzips" the dictionary `{"message": "hello"}` into named keyword arguments `message="hello"`, so Pydantic parses it into `EchoPayload(message="hello")`.
+
+Why modify `job.status = JobStatus.COMPLETED` directly instead of creating a new `updated_job` object?
+In SQLAlchemy ORM, the `job` object returned by `repo.get_job_by_id(job_id)` is already attached to and tracked by the active database session in memory.
+When we modify its attributes directly (`job.status = JobStatus.COMPLETED` and `job.result = result`) and call `repo.update(job)` (`self.db.commit()`), SQLAlchemy automatically detects the changes and generates the `UPDATE jobs SET status=..., result=... WHERE id=...` SQL query for us! There is no need to reconstruct a new object.

@@ -1,16 +1,25 @@
+from typing import Annotated
 import uvicorn
 
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException, status, Depends
 from uuid import uuid4, UUID
 
 from models.jobs import JobsPayload, JobsResponse
-from storage.jobs import jobs_db
 from handlers.registry import handlers
 from services.job_service import run_job
+
+from sqlalchemy.orm import Session
+from repositories.job_repository import JobRepository
+from database.models import Job, JobStatus
+from database.connection import get_db
 
 
 app = FastAPI()
 
+def get_job_repo(db: Session = Depends(get_db)) -> JobRepository:
+    return JobRepository(db)
+
+JobRepo = Annotated[JobRepository, Depends(get_job_repo)]
 
 @app.get("/")
 def hello():
@@ -27,7 +36,7 @@ def hello():
         }
     },
 )
-def create_job(body: JobsPayload) -> JobsResponse:
+def create_job(body: JobsPayload, repo: JobRepo) -> JobsResponse:
 
     if body.type not in handlers:
         raise HTTPException(
@@ -38,30 +47,32 @@ def create_job(body: JobsPayload) -> JobsResponse:
             },
         )
 
-    job = JobsResponse(
+    job = Job(
         id=uuid4(),
         type=body.type,
-        status="created",
-        payload=body.payload,
+        status=JobStatus.CREATED,
+        payload=body.payload.model_dump(),
     )
 
-    jobs_db[job.id] = job
+    repo.create(job)
 
     return job
 
 
 # GET ALL JOBS
 @app.get("/jobs", response_model=list[JobsResponse])
-def list_jobs() -> list[JobsResponse]:
+def list_jobs(repo: JobRepo) -> list[JobsResponse]:
+    
+    jobs = repo.get_all_jobs()
 
-    return list(jobs_db.values())
+    return list(jobs)
 
 
 # GET ONE JOB
 @app.get("/jobs/{job_id}", response_model=JobsResponse)
-def get_job(job_id: UUID) -> JobsResponse:
+def get_job(job_id: UUID, repo: JobRepo) -> JobsResponse:
 
-    job = jobs_db.get(job_id)
+    job = repo.get_job_by_id(job_id)
 
     if job is None:
         raise HTTPException(
@@ -80,9 +91,9 @@ def get_job(job_id: UUID) -> JobsResponse:
     "/jobs/{job_id}/run",
     response_model=JobsResponse,
 )
-def run_job_endpoint(job_id: UUID) -> JobsResponse:
+def run_job_endpoint(job_id: UUID, repo: JobRepo) -> JobsResponse:
 
-    return run_job(job_id)
+    return run_job(job_id, repo)
 
 
 if __name__ == "__main__":

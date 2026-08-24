@@ -3,14 +3,15 @@ from uuid import UUID
 from fastapi import HTTPException, status
 
 from models.jobs import JobsResponse
-from storage.jobs import jobs_db
+from repositories.job_repository import JobRepository
+from database.models import JobStatus
 from handlers.registry import handlers
 
 
-def run_job(job_id: UUID) -> JobsResponse:
+def run_job(job_id: UUID, repo: JobRepository) -> JobsResponse:
 
     # 1. Find the job
-    job = jobs_db.get(job_id)
+    job = repo.get_job_by_id(job_id)
 
     if job is None:
         raise HTTPException(
@@ -22,7 +23,7 @@ def run_job(job_id: UUID) -> JobsResponse:
         )
 
     # 2. Check whether it can be executed
-    if job.status != "created":
+    if job.status != JobStatus.CREATED:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={
@@ -43,20 +44,16 @@ def run_job(job_id: UUID) -> JobsResponse:
             },
         )
 
-    # 4. Actually execute the job
-    result = handler.execute(job.payload)
+    # 4. Parse stored dict into the handler's Pydantic model
+    payload = handler.payload_schema(**job.payload)
 
-    # 5. Update job
-    updated_job = JobsResponse(
-        id=job.id,
-        type=job.type,
-        status="completed",
-        payload=job.payload,
-        result=result,
-    )
+    # 5. Actually execute the job
+    result = handler.execute(payload)
 
-    # 6. Store updated job
-    jobs_db[job.id] = updated_job
+    # 6. Update fields on the database model
+    job.status = JobStatus.COMPLETED
+    job.result = result
 
-    # 7. Return it
+    # 7. Persist changes to PostgreSQL & return
+    updated_job = repo.update(job)
     return updated_job
