@@ -1,5 +1,13 @@
-from models.jobs import AddPayload
+from pydantic import BaseModel
+from handlers.registry import register_handler
 
+
+class AddPayload(BaseModel):
+    a: int
+    b: int
+
+
+@register_handler("add")
 class AdditionHandler:
     payload_schema = AddPayload
 

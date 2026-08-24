@@ -28,7 +28,7 @@ def run_job(job_id: UUID, repo: JobRepository) -> JobsResponse:
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={
                 "status": "failure",
-                "message": f"Job cannot be run from '{job.status}' state",
+                "message": f"Job cannot be run from '{job.status.value}' state",
             },
         )
 
@@ -47,12 +47,19 @@ def run_job(job_id: UUID, repo: JobRepository) -> JobsResponse:
     # 4. Parse stored dict into the handler's Pydantic model
     payload = handler.payload_schema(**job.payload)
 
+    job.status = JobStatus.RUNNING
+    repo.update(job)
+    
     # 5. Actually execute the job
-    result = handler.execute(payload)
-
-    # 6. Update fields on the database model
-    job.status = JobStatus.COMPLETED
-    job.result = result
+    try:
+        result = handler.execute(payload)
+        # 6. Update fields on the database model (Success)
+        job.status = JobStatus.COMPLETED
+        job.result = result
+    except Exception as e:
+        # 6. Update fields on the database model (Failure)
+        job.status=JobStatus.FAILED
+        job.result = {"error":str(e)}
 
     # 7. Persist changes to PostgreSQL & return
     updated_job = repo.update(job)

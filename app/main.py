@@ -38,7 +38,8 @@ def hello():
 )
 def create_job(body: JobsPayload, repo: JobRepo) -> JobsResponse:
 
-    if body.type not in handlers:
+    handler = handlers.get(body.type)
+    if handler is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={
@@ -47,11 +48,22 @@ def create_job(body: JobsPayload, repo: JobRepo) -> JobsResponse:
             },
         )
 
+    try:
+        validated_payload = handler.payload_schema.model_validate(body.payload)
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "status": "failure",
+                "message": f"Invalid payload for job type '{body.type}': {str(e)}",
+            },
+        )
+
     job = Job(
         id=uuid4(),
         type=body.type,
         status=JobStatus.CREATED,
-        payload=body.payload.model_dump(),
+        payload=validated_payload.model_dump(),
     )
 
     repo.create(job)
