@@ -15,10 +15,10 @@ def register_handler(job_type: str):
 
 def discover_handlers():
     """Dynamically imports all handler modules in the handlers/ directory."""
-    import handlers as handlers_pkg
-    for _, module_name, _ in pkgutil.iter_modules(handlers_pkg.__path__):
-        if module_name != "registry":
-            importlib.import_module(f"handlers.{module_name}")
+    import handlers as handlers_pkg # /handlers folder
+    for _, module_name, _ in pkgutil.iter_modules(handlers_pkg.__path__): # iterating through the folder
+        if module_name != "registry": # skipping the registry file
+            importlib.import_module(f"handlers.{module_name}") # importing the handler module
 
 
 # Automatically discover and register all handlers on import
