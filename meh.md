@@ -98,9 +98,9 @@ Introduced `/database` directory, responsible for database connection, models, a
 - `database/alembic`: Manages database schema migrations over time.
 
 ```text
-models/jobs.py                                 database/models.py
-       │                                               │
-       └── "Is this API data valid?"                   └── "How should this data be stored?"
+models/jobs.py                          database/models.py
+       │                                        │
+       └── "Is this API data valid?"            └── "How should this data be stored?"
 ```
 
 ---
@@ -262,3 +262,36 @@ Pydantic Model (JobsResponse) ← formats output sent back to client
 #### C. Job Lifecycle & Safe Execution (`services/job_service.py`)
 - **State Machine:** `CREATED` ➔ `RUNNING` ➔ `COMPLETED` or `FAILED`.
 - **Error Handling:** Handlers are wrapped in a `try...except Exception as e:` block. If execution throws an error (e.g. division by zero), the job transitions to `FAILED` and records `{"error": str(e)}` in PostgreSQL instead of crashing the server with a 500 error.
+
+---
+
+## 25/08/2026 — Unit tests using pytest
+wrote unit tests in /tests folder following the same structure as app with only difference being the file names have test_{name}.py cuz pytest will automatically run/test files with prefix test.
+in unit tests we have every case for the handlers. we get the test result with assert for the right cases for errors we put  
+with pytest.raises({error}):
+    handler.execute(payload)
+then finally integration tests, testing the api, all cases, testing the entire lifecycle too.
+to run the tests we do pytest in root folder.
+pyproject.toml is a file like package.json in react with all the configs
+then .vscode/settings.json is for the ide. 
+these files are for setting /app as root for tests and ide to avoid red squigly lines showing import error
+
+## 26/08/2026 - Pagination and filtering
+def get_all_jobs(self,
+    limit: int = 10,
+    status: JobStatus | None = None,
+    type: str | None = None,
+    offset: int = 0) -> list[Job]:
+        query = self.db.query(Job)
+
+        # filter by status
+        if status is not None:
+            query = query.filter(Job.status == status)
+
+        # filter by type
+        if type is not None:
+            query = query.filter(Job.type == type)
+
+        return query.order_by(Job.created_at.desc()).offset(offset).limit(limit).all()
+
+straight forward it is.

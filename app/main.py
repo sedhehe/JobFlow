@@ -1,7 +1,7 @@
 from typing import Annotated
 import uvicorn
 
-from fastapi import FastAPI, HTTPException, status, Depends
+from fastapi import FastAPI, HTTPException, status, Depends, Query
 from uuid import uuid4, UUID
 
 from models.jobs import JobsPayload, JobsResponse
@@ -36,7 +36,7 @@ def hello():
         }
     },
 )
-def create_job(body: JobsPayload, repo: JobRepo) -> JobsResponse:
+def create_job(body: JobsPayload, repo: JobRepo) -> Job:
 
     handler = handlers.get(body.type)
     if handler is None:
@@ -52,7 +52,7 @@ def create_job(body: JobsPayload, repo: JobRepo) -> JobsResponse:
         validated_payload = handler.payload_schema.model_validate(body.payload)
     except Exception as e:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail={
                 "status": "failure",
                 "message": f"Invalid payload for job type '{body.type}': {str(e)}",
@@ -73,16 +73,41 @@ def create_job(body: JobsPayload, repo: JobRepo) -> JobsResponse:
 
 # GET ALL JOBS
 @app.get("/jobs", response_model=list[JobsResponse])
-def list_jobs(repo: JobRepo) -> list[JobsResponse]:
+def list_jobs(repo: JobRepo,
+limit: int = Query(default = 10, ge = 1, le = 100),
+job_status: JobStatus | None = Query(default = None, alias = "status"),
+type: str | None = None,
+offset: int = Query(default = 0, ge = 0)) -> list[Job]:
+
+    if type is not None and type not in handlers:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "status": "failure",
+                "message": f"Invalid job type: '{type}'",
+            },
+        )
+    if job_status is not None and job_status not in JobStatus:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "status": "failure",
+                "message": f"Invalid job status: '{job_status}'",
+            },
+        )
     
-    jobs = repo.get_all_jobs()
+    jobs = repo.get_all_jobs(
+        limit = limit,
+        status = job_status,
+        type = type,
+        offset = offset)
 
     return list(jobs)
 
 
 # GET ONE JOB
 @app.get("/jobs/{job_id}", response_model=JobsResponse)
-def get_job(job_id: UUID, repo: JobRepo) -> JobsResponse:
+def get_job(job_id: UUID, repo: JobRepo) -> Job:
 
     job = repo.get_job_by_id(job_id)
 
@@ -103,7 +128,7 @@ def get_job(job_id: UUID, repo: JobRepo) -> JobsResponse:
     "/jobs/{job_id}/run",
     response_model=JobsResponse,
 )
-def run_job_endpoint(job_id: UUID, repo: JobRepo) -> JobsResponse:
+def run_job_endpoint(job_id: UUID, repo: JobRepo) -> Job:
 
     return run_job(job_id, repo)
 

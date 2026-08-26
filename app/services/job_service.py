@@ -2,13 +2,13 @@ from uuid import UUID
 
 from fastapi import HTTPException, status
 
-from models.jobs import JobsResponse
+from database.models import Job
 from repositories.job_repository import JobRepository
 from database.models import JobStatus
 from handlers.registry import handlers
 
 
-def run_job(job_id: UUID, repo: JobRepository) -> JobsResponse:
+def run_job(job_id: UUID, repo: JobRepository) -> Job:
 
     # 1. Find the job
     job = repo.get_job_by_id(job_id)

@@ -1,6 +1,6 @@
 from uuid import UUID
 from sqlalchemy.orm import Session
-from database.models import Job
+from database.models import Job, JobStatus
 
 class JobRepository:
     def __init__(self, db: Session):
@@ -18,8 +18,22 @@ class JobRepository:
             return None
         return job
 
-    def get_all_jobs(self):
-        return self.db.query(Job).order_by(Job.created_at.desc()).all()
+    def get_all_jobs(self,
+    limit: int = 10,
+    status: JobStatus | None = None,
+    type: str | None = None,
+    offset: int = 0) -> list[Job]:
+        query = self.db.query(Job)
+
+        # filter by status
+        if status is not None:
+            query = query.filter(Job.status == status)
+
+        # filter by type
+        if type is not None:
+            query = query.filter(Job.type == type)
+
+        return query.order_by(Job.created_at.desc()).offset(offset).limit(limit).all()
 
     def update(self, job:Job):
         self.db.commit()
