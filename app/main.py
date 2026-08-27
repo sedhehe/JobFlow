@@ -13,6 +13,7 @@ from repositories.job_repository import JobRepository
 from database.models import Job, JobStatus
 from database.connection import get_db
 
+from cache.redis import JobCache
 
 app = FastAPI()
 
@@ -20,6 +21,11 @@ def get_job_repo(db: Session = Depends(get_db)) -> JobRepository:
     return JobRepository(db)
 
 JobRepo = Annotated[JobRepository, Depends(get_job_repo)]
+
+def get_job_cache():
+    return JobCache()
+
+JobCacheDep = Annotated[JobCache, Depends(get_job_cache)]
 
 @app.get("/")
 def hello():
@@ -107,18 +113,23 @@ offset: int = Query(default = 0, ge = 0)) -> list[Job]:
 
 # GET ONE JOB
 @app.get("/jobs/{job_id}", response_model=JobsResponse)
-def get_job(job_id: UUID, repo: JobRepo) -> Job:
+def get_job(job_id: UUID, repo: JobRepo, cache: JobCacheDep) -> Job | dict:
 
-    job = repo.get_job_by_id(job_id)
+    job = cache.get(job_id)
+    if job is  None:
 
-    if job is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "status": "failure",
-                "message": f"Job not found: '{job_id}'",
-            },
-        )
+        job = repo.get_job_by_id(job_id)
+
+        if job is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={
+                    "status": "failure",
+                    "message": f"Job not found: '{job_id}'",
+                },
+            )
+
+        cache.set(job)
 
     return job
 
@@ -128,9 +139,13 @@ def get_job(job_id: UUID, repo: JobRepo) -> Job:
     "/jobs/{job_id}/run",
     response_model=JobsResponse,
 )
-def run_job_endpoint(job_id: UUID, repo: JobRepo) -> Job:
+def run_job_endpoint(job_id: UUID, repo: JobRepo, cache: JobCacheDep) -> Job:
 
-    return run_job(job_id, repo)
+    updated_job = run_job(job_id, repo)
+
+    cache.delete(job_id)
+    
+    return updated_job
 
 
 if __name__ == "__main__":

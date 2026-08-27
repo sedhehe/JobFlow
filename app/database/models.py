@@ -27,11 +27,13 @@ class Job(Base):
     type: Mapped[str] = mapped_column(
         VARCHAR(50),
         nullable=False,
+        index = True
     )
 
     status: Mapped[JobStatus] = mapped_column(
         SQLEnum(JobStatus),
         nullable=False,
+        index = True
     )
 
     payload: Mapped[dict] = mapped_column(
@@ -48,6 +50,7 @@ class Job(Base):
         DateTime(timezone=True),
         nullable=False,
         default=func.now(),
+        index = True
     )
 
     updated_at: Mapped[DateTime] = mapped_column(

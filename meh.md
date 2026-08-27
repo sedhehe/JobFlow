@@ -265,33 +265,117 @@ Pydantic Model (JobsResponse) ← formats output sent back to client
 
 ---
 
-## 25/08/2026 — Unit tests using pytest
-wrote unit tests in /tests folder following the same structure as app with only difference being the file names have test_{name}.py cuz pytest will automatically run/test files with prefix test.
-in unit tests we have every case for the handlers. we get the test result with assert for the right cases for errors we put  
-with pytest.raises({error}):
-    handler.execute(payload)
-then finally integration tests, testing the api, all cases, testing the entire lifecycle too.
-to run the tests we do pytest in root folder.
-pyproject.toml is a file like package.json in react with all the configs
-then .vscode/settings.json is for the ide. 
-these files are for setting /app as root for tests and ide to avoid red squigly lines showing import error
+## 25/08/2026 — Unit & Integration Tests using Pytest
 
-## 26/08/2026 - Pagination and filtering
-def get_all_jobs(self,
+- Wrote unit tests in the `/tests` folder following the same structure as `app/`, with the only difference being that test files are named `test_{name}.py` because pytest automatically discovers files with the `test_` prefix.
+- In unit tests, we test every case for the handlers:
+  - We verify expected results using `assert`.
+  - For expected errors, we test using:
+    ```python
+    with pytest.raises({error}):
+        handler.execute(payload)
+    ```
+- Wrote integration tests for the API covering all cases and testing the entire job lifecycle.
+- To run tests: execute `pytest` in the root folder.
+- `pyproject.toml` acts like `package.json` in React, storing all tool configurations.
+- `.vscode/settings.json` configures the IDE.
+- These configuration files set `/app` as the root directory for tests and IDE analysis to eliminate import error squiggly lines.
+
+---
+
+## 26/08/2026 — Pagination & Query Filtering
+
+Implemented dynamic filtering and pagination in `JobRepository`:
+
+```python
+def get_all_jobs(
+    self,
     limit: int = 10,
     status: JobStatus | None = None,
     type: str | None = None,
-    offset: int = 0) -> list[Job]:
-        query = self.db.query(Job)
+    offset: int = 0
+) -> list[Job]:
+    query = self.db.query(Job)
 
-        # filter by status
-        if status is not None:
-            query = query.filter(Job.status == status)
+    # Filter by status
+    if status is not None:
+        query = query.filter(Job.status == status)
 
-        # filter by type
-        if type is not None:
-            query = query.filter(Job.type == type)
+    # Filter by type
+    if type is not None:
+        query = query.filter(Job.type == type)
 
-        return query.order_by(Job.created_at.desc()).offset(offset).limit(limit).all()
+    return (
+        query.order_by(Job.created_at.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+```
 
-straight forward it is.
+- Straightforward and clean query building.
+
+---
+
+## 27/08/2026 — ACID Transactions, Docker & Redis Caching
+
+### 1. ACID Transactions & Rollback
+- When a database action is happening for one user and it fails, that user and subsequent users will face issues with broken/aborted transactions.
+- **Solution:** In `database/connection.py`, we add an `except Exception:` block to catch errors and roll back the transaction using `db.rollback()`, and then `finally` close the connection and session.
+- `db.rollback()` safely discards any half-written or corrupted transactions.
+
+---
+
+### 2. Docker & Docker Compose
+- **The Problem:** Manually starting our PostgreSQL server and now Redis server is tedious. In the future, as we add more services, manually starting and remembering every service causes massive headaches and debugging issues if one is missed.
+- **The Solution:** With Docker, we can launch every single required service with one command (`docker compose up -d`) and shut them down cleanly with `docker compose down`.
+- Configured in a single file: `docker-compose.yml`.
+- We put every service in a container. What the container contains is defined by the `image`, and runtime parameters (like port mappings and volumes) are configured declaratively:
+
+```yaml
+services:
+  postgres: # Container for Postgres
+    image: postgres:latest # Postgres image
+    ports:
+      - "5432:5432" # Map host port 5432 to container port 5432
+    environment:
+      POSTGRES_DB: jobflow # Set db name
+      POSTGRES_USER: vivekrallapally # Set db user
+      POSTGRES_HOST_AUTH_METHOD: trust # No password required
+    volumes:
+      - postgres_data:/var/lib/postgresql/data # Persistent storage volume
+
+  redis: # Container for Redis
+    image: redis:latest # Redis image
+    ports:
+      - "6379:6379" # Map host port 6379 to container port 6379
+
+volumes:
+  postgres_data:
+```
+
+---
+
+### 3. Redis Caching
+- **Redis:** A super-fast in-memory data storage and retrieval system used for caching.
+- **Why Caching?** If the same data is retrieved repeatedly by multiple users, fetching from the database every time is slow and expensive.
+- **Cache-Aside Pattern:**
+  1. Fetch data once from PostgreSQL and store it in cache (Redis).
+  2. When a user requests that data, first check the cache.
+  3. **If found (HIT):** Return faster results with zero database load.
+  4. **If not found (MISS):** Fetch from DB and store in cache for later use.
+
+#### Implementation Details (`app/cache/redis.py`):
+- Initialized Redis connection client using `Redis(host, port, decode_responses=True)`.
+- Created `JobCache` class with core caching operations: `get`, `set`, and `delete`.
+- **Key Namespacing:** In Redis, data is stored as a global key-value store `{"key1": "data1", "key2": "data2"}`. To prevent two different entities (like `job:123` and `user:123`) from overwriting each other, we prefix keys with their namespace: `f"job:{job_id}"`.
+- **`get(job_id)`:** Retrieves data from Redis using the namespaced key.
+- **`set(job, ttl)`:** Takes the job as `database.models.Job` (SQLAlchemy model), converts it to `models.jobs.JobsResponse` using `model_validate(job, from_attributes=True).model_dump_json()`, and sets it in cache with an expiration time (`ttl`).
+  - *Why conversion is necessary:* Redis stores data as strings. Passing a raw SQLAlchemy `Job` directly into `json.dumps()` throws `TypeError: Object of type Job is not JSON serializable` because `json.dumps()` only handles Python primitives. Pydantic handles serializing UUIDs, Datetimes, and ORM objects cleanly to JSON.
+- **`delete(job_id)`:** Deletes the key on state mutation.
+
+#### Complete Request Flow:
+1. **Job Created:** Saved to PostgreSQL.
+2. **First `GET /jobs/{id}` (Cache Miss):** Checked in Redis (not found) ➔ fetched from PostgreSQL ➔ saved to Redis cache with TTL.
+3. **Subsequent `GET /jobs/{id}` (Cache Hit):** Checked in Redis (found) ➔ returned directly from cache in sub-milliseconds.
+4. **Job Executed / State Updated:** Invalidate/delete the key from Redis cache (`cache.delete(job_id)`) so stale/old data is never returned to users.

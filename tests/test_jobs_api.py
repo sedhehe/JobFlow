@@ -1,4 +1,5 @@
 from fastapi.testclient import TestClient
+from cache.redis import redis_client
 from main import app
 
 client = TestClient(app)
@@ -71,3 +72,24 @@ def test_get_jobs_by_invalid_limit():
     response = client.get("/jobs?limit=abc")
     assert response.status_code == 422
     
+def test_get_job_caches_in_redis():
+    response = client.post("/jobs", json={
+        "type": "echo",
+        "payload": {"message": "Hello"}
+    })
+    job_id = response.json()["id"]
+    get_response = client.get(f"/jobs/{job_id}")
+    assert get_response.status_code == 200
+    cached = redis_client.get(f"job:{job_id}")
+    assert cached is not None
+
+def test_run_job_invalidates_cache():
+    response = client.post("/jobs", json={
+        "type": "echo",
+        "payload": {"message": "Hello"}
+    })
+    job_id = response.json()["id"]
+    run_response = client.post(f"/jobs/{job_id}/run")
+    assert run_response.status_code == 200
+    cached = redis_client.get(f"job:{job_id}")
+    assert cached is None
