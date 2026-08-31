@@ -23,7 +23,7 @@ def run_job(job_id: UUID, repo: JobRepository) -> Job:
         )
 
     # 2. Check whether it can be executed
-    if job.status != JobStatus.CREATED:
+    if job.status not in (JobStatus.CREATED, JobStatus.QUEUED):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={
@@ -59,7 +59,7 @@ def run_job(job_id: UUID, repo: JobRepository) -> Job:
     except Exception as e:
         # 6. Update fields on the database model (Failure)
         job.status=JobStatus.FAILED
-        job.result = {"error":str(e)}
+        job.error_message = str(e)
 
     # 7. Persist changes to PostgreSQL & return
     updated_job = repo.update(job)

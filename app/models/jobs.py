@@ -13,3 +13,7 @@ class JobsResponse(BaseModel):
     status: str
     payload: dict
     result: dict | None = None
+    retry_count: int | None = None
+    max_retries: int | None = None
+    error_message: str | None = None
+    

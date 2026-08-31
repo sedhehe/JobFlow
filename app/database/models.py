@@ -2,7 +2,7 @@ from enum import Enum
 from uuid import UUID
 
 from sqlalchemy import UUID as SQLUUID
-from sqlalchemy import VARCHAR, Enum as SQLEnum, DateTime, func
+from sqlalchemy import VARCHAR, Enum as SQLEnum, DateTime, func, Integer
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -11,6 +11,7 @@ from database.connection import Base
 
 class JobStatus(Enum):
     CREATED = "created"
+    QUEUED = "queued"
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -59,3 +60,21 @@ class Job(Base):
         default=func.now(),
         onupdate=func.now(),
     )
+
+    retry_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
+
+    max_retries: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=5,
+    )
+
+    error_message: Mapped[str | None] = mapped_column(
+        VARCHAR(1000),
+        nullable=True,
+    )
+

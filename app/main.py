@@ -14,6 +14,8 @@ from database.models import Job, JobStatus
 from database.connection import get_db
 
 from cache.redis import JobCache
+from queues.queue import JobQueue
+
 
 app = FastAPI()
 
@@ -26,6 +28,11 @@ def get_job_cache():
     return JobCache()
 
 JobCacheDep = Annotated[JobCache, Depends(get_job_cache)]
+
+def get_job_queue():
+    return JobQueue()
+
+JobQueueDep = Annotated[JobQueue, Depends(get_job_queue)]
 
 @app.get("/")
 def hello():
@@ -116,7 +123,7 @@ offset: int = Query(default = 0, ge = 0)) -> list[Job]:
 def get_job(job_id: UUID, repo: JobRepo, cache: JobCacheDep) -> Job | dict:
 
     job = cache.get(job_id)
-    if job is  None:
+    if job is None:
 
         job = repo.get_job_by_id(job_id)
 
@@ -137,16 +144,36 @@ def get_job(job_id: UUID, repo: JobRepo, cache: JobCacheDep) -> Job | dict:
 # RUN JOB
 @app.post(
     "/jobs/{job_id}/run",
+    status_code=status.HTTP_202_ACCEPTED,
     response_model=JobsResponse,
+    responses={
+        status.HTTP_404_NOT_FOUND: {
+            "description": "Job not found"
+        }
+    }
 )
-def run_job_endpoint(job_id: UUID, repo: JobRepo, cache: JobCacheDep) -> Job:
+def run_job_endpoint(job_id: UUID, repo: JobRepo, cache: JobCacheDep, queue: JobQueueDep) -> Job:
 
-    updated_job = run_job(job_id, repo)
+    job = repo.get_job_by_id(job_id)
+    
+    if job is None:
+        raise HTTPException(
+            status_code = status.HTTP_404_NOT_FOUND,
+            detail = {
+                "status": "failure",
+                "message": f"Job not found: '{job_id}'",
+            }
+        )
+    
+    job.status = JobStatus.QUEUED
+    repo.update(job)
 
     cache.delete(job_id)
-    
-    return updated_job
 
+    queue.enqueue(job_id)
+
+    return job
+    
 
 if __name__ == "__main__":
     uvicorn.run(

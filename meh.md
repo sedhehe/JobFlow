@@ -379,3 +379,40 @@ volumes:
 2. **First `GET /jobs/{id}` (Cache Miss):** Checked in Redis (not found) ➔ fetched from PostgreSQL ➔ saved to Redis cache with TTL.
 3. **Subsequent `GET /jobs/{id}` (Cache Hit):** Checked in Redis (found) ➔ returned directly from cache in sub-milliseconds.
 4. **Job Executed / State Updated:** Invalidate/delete the key from Redis cache (`cache.delete(job_id)`) so stale/old data is never returned to users.
+
+## 30/08/2026 — Job Queues, Background Workers & Horizontal Scaling
+
+- **Job Queue:** Created a FIFO queue in `queues/queue.py` backed by Redis with key namespacing (`"job:queue"`).
+  - **Enqueue (`lpush`):** Pushes job IDs onto the left of the Redis list.
+  - **Dequeue (`brpop`):** Blocking pop from the right of the Redis list with a timeout, putting the worker to sleep with 0% CPU when idle.
+- **Worker Process (`worker.py`):**
+  - Runs in an infinite loop calling `queue.dequeue()`.
+  - If no job is found within 5s, it continues waiting.
+  - When a job arrives, opens a fresh database session, executes `run_job(job_id, repo)`, invalidates cache, and closes the session in a `finally` block.
+
+#### Updated End-to-End Flow:
+1. **Job Creation (`POST /jobs`):** Payload validated via Pydantic (`models/jobs.py`) ➔ saved to PostgreSQL with status `CREATED` (validated via SQLAlchemy model `database/models.py`). Cache and Queue remain untouched (lazy loading).
+2. **First Read (`GET /jobs/{id}`):** Cache checked (miss) ➔ fetched from PostgreSQL ➔ saved to Redis cache with 60s TTL.
+3. **Job Enqueued (`POST /jobs/{id}/run`):** Fetches job from PostgreSQL ➔ updates status to `QUEUED` ➔ deletes stale `"created"` cache from Redis ➔ pushes `job_id` to Redis queue ➔ immediately returns `202 Accepted` in ~2ms.
+4. **Worker Picks Up Job:** Worker pops `job_id` from Redis queue ➔ marks status `RUNNING` in DB ➔ deletes stale `"queued"` cache ➔ calls `run_job(job_id, repo)`.
+   - Inside `run_job`: Loads handler using `job.type` and executes calculation.
+   - If execution fails ➔ status updated to `FAILED`.
+   - If execution succeeds ➔ status updated to `COMPLETED` with `result` stored in DB.
+5. **Session Cleanup:** Worker closes the DB session.
+6. **Subsequent Read (`GET /jobs/{id}`):** Fetches updated `COMPLETED` status from DB on first miss, caches it in Redis, and serves all subsequent reads directly from Redis in 0.1ms!
+
+- **Horizontal Scaling:** We can launch multiple worker processes in separate terminal tabs/containers. Redis automatically load balances jobs across all active workers with zero race conditions!
+
+---
+
+## 31/08/2026 — Failure Recovery, Retries & Dead Letter Queue (DLQ)
+
+- **Dead Letter Queue (DLQ):** Created a secondary queue in Redis under the key namespace `"job:dlq"`.
+  - **`enqueue_dlq(job_id)`:** Pushes persistently failing job IDs to the DLQ.
+  - **`get_dlq_jobs()`:** Reads all quarantined jobs from the DLQ for inspection and debugging.
+  - *Why no dequeue?* We don't want to pop/delete items automatically; we want them quarantined so engineers can view logs, investigate bugs, and inspect corrupted payloads!
+
+- **Retry Mechanism & Exponential Backoff:**
+  - When a job fails, we increment `retry_count` (up to `max_retries = 5`).
+  - To prevent spamming external servers, we delay retries exponentially ($2^{\text{retry\_count}}$ seconds: $2\text{s} ➔ 4\text{s} ➔ 8\text{s} ➔ 16\text{s} ➔ 32\text{s}$).
+  - Once retries are exhausted (`retry_count >= max_retries`), the job status is set to `FAILED`, the error message is persisted in PostgreSQL, the job is moved to the DLQ, and the cache key is deleted.
