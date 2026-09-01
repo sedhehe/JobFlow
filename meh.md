@@ -416,3 +416,39 @@ volumes:
   - When a job fails, we increment `retry_count` (up to `max_retries = 5`).
   - To prevent spamming external servers, we delay retries exponentially ($2^{\text{retry\_count}}$ seconds: $2\text{s} ➔ 4\text{s} ➔ 8\text{s} ➔ 16\text{s} ➔ 32\text{s}$).
   - Once retries are exhausted (`retry_count >= max_retries`), the job status is set to `FAILED`, the error message is persisted in PostgreSQL, the job is moved to the DLQ, and the cache key is deleted.
+
+## 01/09/2026 — Celery Architecture & Dynamic Multi-Queue Routing
+
+- **Celery Application (`app/celery_app.py`):**
+  - Configured Celery as the central task orchestration hub.
+  - **Name:** `"jobflow"` (hub identifier).
+  - **Broker:** Redis DB 0 (`redis://localhost:6379/0`) where tasks wait in queues.
+  - **Backend:** Redis DB 1 (`redis://localhost:6379/1`) where workers store task completion results and state.
+  - **Multi-Queue Routing (Priority Lanes):**
+    - `high_priority`: Fast, lightweight jobs (e.g. `echo`, `add`).
+    - `default`: Standard jobs (e.g. `division`).
+    - `low_priority`: Heavy background jobs (e.g. video processing, bulk exports).
+  - **Autodiscover:** Configured `autodiscover_tasks(["tasks"])` to register task modules dynamically.
+
+- **Distributed Task Definition (`app/tasks/job_tasks.py`):**
+  - Created `execute_job_task` decorated with `@celery_app.task(bind=True, max_retries=5)`.
+  - Opens an isolated database session per execution, runs `run_job()`, and invalidates cache.
+  - **Automated Exponential Backoff & DLQ Quarantine:**
+    - Uses Celery's built-in `self.retry(countdown=2 ** self.request.retries)`.
+    - When all 5 retries are exhausted (`self.request.retries >= self.max_retries`), the task automatically quarantines the job ID to our Dead Letter Queue (`job_queue.enqueue_dlq(job_id)`) and raises the exception.
+
+- **Open-Closed Principle & Decorator Factories:**
+  - Enhanced `@register_handler(job_type, priority="default")` into a decorator factory.
+  - Handlers declare their own priority metadata (e.g. `EchoHandler` declares `priority="high_priority"`).
+  - `POST /jobs/{id}/run` in `main.py` reads `handler.priority` and dispatches via `execute_job_task.apply_async(args=[str(job_id)], queue=priority_queue)` with zero hardcoded `if-elif-else` statements.
+  - Celery serializes the task into a standard JSON envelope and performs the `LPUSH` into Redis automatically!
+
+- **Scheduled Maintenance with Celery Beat (`app/tasks/job_tasks.py` & `app/repositories/job_repository.py`):**
+  - Configured `beat_schedule` to run `cleanup_stale_jobs_task` periodically (every hour).
+  - **The Worker Heartbeat Pattern (`ping_heartbeat`):** Workers executing long tasks periodically update `job.updated_at = NOW`.
+  - **Zombie Job Recovery (`recover_zombies`):** If a worker abruptly crashes or gets OOM-killed while running a job, its heartbeats stop. If `updated_at < (NOW - 15 minutes)`, Celery Beat identifies the dead job and marks it as `FAILED` with an explanatory error message.
+  - **Data Retention Pruning (`prune_old_jobs`):** Automatically hard deletes finished (`COMPLETED` / `FAILED`) rows older than 30 days (`created_at < NOW - 30 days`) to prevent database bloat and keep query performance lightning fast.
+
+we moved from /queues and worker.py our inhouse workers to celery celery_app.py and /tasks
+
+

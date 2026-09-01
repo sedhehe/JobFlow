@@ -5,10 +5,12 @@ from typing import Type, Any
 handlers: dict[str, Any] = {}
 
 
-def register_handler(job_type: str):
+def register_handler(job_type: str, priority: str = "default"):
     """Decorator to auto-register handler classes by job type."""
     def decorator(cls: Type[Any]):
-        handlers[job_type] = cls()
+        instance = cls()
+        instance.priority = priority
+        handlers[job_type] = instance
         return cls
     return decorator
 

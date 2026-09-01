@@ -7,7 +7,7 @@ class AddPayload(BaseModel):
     b: int
 
 
-@register_handler("add")
+@register_handler("add", priority="high_priority")
 class AdditionHandler:
     payload_schema = AddPayload
 

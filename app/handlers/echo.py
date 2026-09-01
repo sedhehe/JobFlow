@@ -6,7 +6,7 @@ class EchoPayload(BaseModel):
     message: str
 
 
-@register_handler("echo")
+@register_handler("echo", priority="high_priority")
 class EchoHandler:
     payload_schema = EchoPayload
 

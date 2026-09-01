@@ -16,6 +16,8 @@ from database.connection import get_db
 from cache.redis import JobCache
 from queues.queue import JobQueue
 
+from tasks.job_tasks import execute_job_task
+
 
 app = FastAPI()
 
@@ -152,7 +154,7 @@ def get_job(job_id: UUID, repo: JobRepo, cache: JobCacheDep) -> Job | dict:
         }
     }
 )
-def run_job_endpoint(job_id: UUID, repo: JobRepo, cache: JobCacheDep, queue: JobQueueDep) -> Job:
+def run_job_endpoint(job_id: UUID, repo: JobRepo, cache: JobCacheDep) -> Job:
 
     job = repo.get_job_by_id(job_id)
     
@@ -170,7 +172,9 @@ def run_job_endpoint(job_id: UUID, repo: JobRepo, cache: JobCacheDep, queue: Job
 
     cache.delete(job_id)
 
-    queue.enqueue(job_id)
+    handler = handlers.get(job.type)
+    priority_queue = getattr(handler, "priority", "default")
+    execute_job_task.apply_async(args=[str(job_id)], queue = priority_queue)
 
     return job
     

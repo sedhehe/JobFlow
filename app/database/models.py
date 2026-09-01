@@ -5,6 +5,7 @@ from sqlalchemy import UUID as SQLUUID
 from sqlalchemy import VARCHAR, Enum as SQLEnum, DateTime, func, Integer
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
+from datetime import datetime
 
 from database.connection import Base
 
@@ -47,14 +48,14 @@ class Job(Base):
         nullable=True,
     )
 
-    created_at: Mapped[DateTime] = mapped_column(
+    created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
         default=func.now(),
         index = True
     )
 
-    updated_at: Mapped[DateTime] = mapped_column(
+    updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
         default=func.now(),
