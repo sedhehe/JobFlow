@@ -2,7 +2,7 @@ import pytest
 from fastapi.testclient import TestClient
 from cache.redis import redis_client
 from main import app
-from uuid import UUID
+from uuid import UUID, uuid4
 # from database.connection import SessionLocal
 # from repositories.job_repository import JobRepository
 from queues.queue import JobQueue
@@ -226,5 +226,55 @@ def test_job_failure_moves_to_dlq():
     # 4. VERIFY: The job is quarantined in DLQ!
     dlq_jobs = queue.get_dlq_jobs()
     assert UUID(job_id) in dlq_jobs
+
+def test_create_job_idempotency_returns_cached_response():
+    key = str(uuid4())
+    res1 = client.post("/jobs", json={
+        "type": "echo",
+        "payload": {"message": "Test Hello"},
+    },
+    headers={"X-Idempotency-key": key})
+    assert res1.status_code == 200
+    first_job_id = res1.json()["id"]
+    
+    res2 = client.post("/jobs", json={
+        "type": "echo",
+        "payload": {"message": "Test Hello"},
+    },
+    headers={"X-Idempotency-key": key})
+    assert res2.status_code == 200
+    assert res2.json()["id"] == first_job_id
+
+def test_create_job_idempotency_returns_409():
+    key = str(uuid4())
+    redis_client.set(f"idempotency:{key}", "IN_PROGRESS")
+    response = client.post("/jobs", json={
+        "type": "echo",
+        "payload": {"message": "Test Hello"},
+    },
+    headers={"X-Idempotency-key": key})
+    assert response.status_code == 409
+    redis_client.delete(f"idempotency:{key}")
+
+def test_rate_limit():
+    ip_headers = {"X-Forwarded-For": "192.168.1.99"}
+    redis_client.delete("rate_limit:192.168.1.99")
+
+    for i in range(10):
+        res = client.post("/jobs", json={
+            "type": "echo", 
+            "payload": {"message": "Test"}},
+            headers=ip_headers
+            )
+        assert res.status_code == 200
+
+    res_blocked = client.post("/jobs", json={
+        "type": "echo", 
+        "payload": {"message": "Test"}},
+        headers=ip_headers
+        )
+
+    assert res_blocked.status_code == 429
+    assert "rate limit exceeded" in res_blocked.json()["detail"]["message"].lower()
 
 

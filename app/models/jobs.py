@@ -1,5 +1,5 @@
 from uuid import UUID
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 
 class JobsPayload(BaseModel):
@@ -8,6 +8,7 @@ class JobsPayload(BaseModel):
 
 
 class JobsResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
     id: UUID
     type: str
     status: str

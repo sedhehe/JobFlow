@@ -449,6 +449,153 @@ volumes:
   - **Zombie Job Recovery (`recover_zombies`):** If a worker abruptly crashes or gets OOM-killed while running a job, its heartbeats stop. If `updated_at < (NOW - 15 minutes)`, Celery Beat identifies the dead job and marks it as `FAILED` with an explanatory error message.
   - **Data Retention Pruning (`prune_old_jobs`):** Automatically hard deletes finished (`COMPLETED` / `FAILED`) rows older than 30 days (`created_at < NOW - 30 days`) to prevent database bloat and keep query performance lightning fast.
 
-we moved from /queues and worker.py our inhouse workers to celery celery_app.py and /tasks
+- **Migration to Production Celery Architecture:**
+  - Transitioned from manual in-house worker loop (`app/worker.py` and `app/queues/`) to production-grade Celery orchestration (`app/celery_app.py` and `app/tasks/job_tasks.py`).
+
+## 02/09/2026 — Level 8: Real-Time State Streaming (WebSockets + Redis Pub/Sub)
+
+- **Architecture & Responsibilities (`app/realtime/`):**
+  - **`ConnectionManager` (`app/realtime/connection_manager.py`):**
+    - Stores active connections using: `{job_id: list[WebSocket]}`.
+    - Responsible for accepting connections, disconnecting on client exit, and pushing messages to clients via `broadcast_to_job()`.
+  - **`pubsub` (`app/realtime/pubsub.py`):**
+    - Responsible for publishing events and listening for updates across servers.
+    - **Publishing:** Uses `redis_client.publish(f"job_events:{job_id}", json.dumps(event))` where `job_events:{job_id}` is the channel topic and `event` contains job state data.
+    - **Subscribing:** Uses `pubsub = r.pubsub()` and `await pubsub.psubscribe("job_events:*")` to listen to all job channels asynchronously.
+    - Extracts `job_id` and `event_data` from incoming messages and forwards them to `connection_manager.broadcast_to_job()`.
+
+- **FastAPI Integration (`app/main.py`):**
+  - Added `@app.websocket("/ws/jobs/{job_id}")` endpoint to manage persistent socket sessions and gracefully handle `WebSocketDisconnect`.
+  - Added a background startup task using FastAPI's `lifespan` context manager to run `start_redis_listener(manager)` continuously.
+
+- **Lifecycle Event Publishing (`publish_job_event`):**
+  - **Created / Enqueued:**
+    `publish_job_event(job.id, {"status": "queued", "job_id": str(job.id)})`
+  - **Running:**
+    `publish_job_event(job.id, {"status": "running", "job_id": str(job.id)})`
+  - **Completed:**
+    `publish_job_event(job.id, {"status": "completed", "job_id": str(job.id), "result": job.result})`
+  - **Failed:**
+    `publish_job_event(job.id, {"status": "failed", "job_id": str(job.id), "error": job.error_message})`
+
+- **The End-to-End Real-Time Flow:**
+  ```text
+  1. Worker finishes running a job and publishes an event to Redis channel `job_events:{job_id}`.
+  2. Client browser is connected via WebSocket (`/ws/jobs/{job_id}`).
+  3. `start_redis_listener` in FastAPI catches the Redis message.
+  4. Listener extracts the payload and invokes `connection_manager.broadcast_to_job()`.
+  5. `ConnectionManager` sends the JSON result directly down the open WebSocket pipe to the client.
+  ```
+
+## 03/09/2026 — Level 6: Idempotency Keys & Exactly-Once Semantics
+
+- **The Core Problem:**
+  - An operation is **idempotent** if applying it multiple times produces the exact same result as applying it once.
+  - Without idempotency, a network blip or double-click triggers a client retry that creates/runs two separate jobs in PostgreSQL and Celery for the same user action, corrupting DB state and duplicating work.
+
+- **How We Solved It (`X-Idempotency-Key`):**
+  - **Client-Side:**
+    - The frontend generates a unique UUID (e.g., `crypto.randomUUID()`) when the user initiates an action.
+    - It stores this key in a local variable and sends it as an HTTP header: `X-Idempotency-Key`.
+    - If a network error occurs, the client's retry loop sends the **exact same key** on subsequent attempts.
+
+  - **Server-Side (`app/services/idempotency.py` & `app/main.py`):**
+    1. **Check & Distributed Lock (`check_or_lock`):**
+       - When a request arrives, we check Redis key `idempotency:{key}`.
+       - **If Key Exists:**
+         - Value is `"IN_PROGRESS"` ➔ Another request is actively running! Return `("IN_PROGRESS", None)` ➔ API responds with **HTTP 409 Conflict**.
+         - Value is a JSON string ➔ Previous request finished! Parse with `json.loads` and return `("COMPLETED", cached_data)` ➔ API returns the cached response immediately (0 database writes!).
+       - **If Key Does Not Exist:**
+         - Acquire atomic lock: `redis.set(key, "IN_PROGRESS", nx=True, ex=60)`.
+         - If acquired: Return `("NEW", None)` ➔ API is authorized to execute the database creation/Celery enqueue.
+         - If race condition occurs (`not acquired`): Another request beat us in that exact millisecond ➔ Return `("IN_PROGRESS", None)`.
+    2. **Save Cached Response (`save_response`):**
+       - Once the database/enqueue finishes, replace `"IN_PROGRESS"` with the serialized JSON response (`JobsResponse.model_validate(job).model_dump(mode="json")`).
+       - Set TTL to 24 hours (`ex=86400`).
+
+  - **Pydantic V2 ORM Serialization (`app/models/jobs.py`):**
+    - Added `model_config = ConfigDict(from_attributes=True)` to `JobsResponse` so Pydantic can directly validate and extract attributes from SQLAlchemy `Job` ORM objects.
+
+- **The End-to-End Idempotency Flow:**
+  ```text
+  Client (First Click) ────► POST /jobs [Key: AAA] ──► Locked "IN_PROGRESS" ──► Creates DB Row ──► Saves JSON in Redis ──► Returns Job
+  Client (Network Retry) ──► POST /jobs [Key: AAA] ──► Finds Saved JSON in Redis ───────────────► Zero DB operations! ──► Returns Job
+  Client (Double Click) ───► POST /jobs [Key: AAA] ──► Key is "IN_PROGRESS" ────────────────────► HTTP 409 Conflict!
+  ```
+
+---
+
+## 04/09/2026 — Level 6: Distributed Rate Limiting (Token Bucket + Redis Lua)
+
+- **The Problem:**
+  - Idempotency protects against retrying the *same* request. But what if a client enters an infinite loop or spams 5,000 *different* requests per second?
+  - Without API throttling, the PostgreSQL connection pool collapses, Redis memory spikes, and workers get overwhelmed.
+  - We need a gatekeeper to enforce a fair usage quota: **HTTP 429 Too Many Requests**.
+
+---
+
+### 1. The Algorithm: Token Bucket 🪣
+- **Capacity ($B = 10$):** Maximum number of tokens the bucket can hold (burst limit).
+- **Refill Rate ($r = 1.0$ token/sec):** Tokens are continuously added back as time elapses.
+- **Cost:** Each request costs **1 token**.
+
+```text
+               💧 Continuous Refill (+1 token / sec up to capacity 10)
+                 │
+                 ▼
+          ┌─────────────┐
+          │  ● ● ● ● ●  │  Bucket holds up to 10 tokens (Burst limit)
+          │  ● ● ● ● ●  │
+          └──────┬──────┘
+                 │
+       Incoming HTTP Request arrives:
+       ├── Has tokens (tokens >= 1)?
+       │   └── Deduct 1 token ➔ Return 200 OK! ✅
+       └── Bucket empty (tokens < 1)?
+           └── Block immediately ➔ Return 429 Too Many Requests! 🛑
+```
+
+---
+
+### 2. The Concurrency Race Condition & Redis Lua Solution 📜⚡
+
+- **Why Not Calculate in Python?**
+  - If 10 requests hit 3 FastAPI instances at the exact same millisecond when 1 token is left:
+    - All 10 read `tokens = 1` from Redis.
+    - All 10 subtract 1 in Python and save `tokens = 0`.
+    - **All 10 requests get allowed through!** (Rate limit breached due to check-then-act race condition).
+- **The Lua Script Solution:**
+  - Redis executes Lua scripts **single-threaded and atomically** directly inside memory in $0.05\text{ms}$.
+  - No other Redis command can interrupt while the script calculates time elapsed, refills tokens, and deducts a token. Zero race conditions across multiple API instances!
+
+---
+
+### 3. FastAPI Global Gatekeeper Architecture
+
+- Implemented in `app/main.py` using `app = FastAPI(dependencies=[Depends(rate_limit)])`.
+- **Gatekeeper vs Data Provider:**
+  - `rate_limit` is a **Gatekeeper**: Runs before route logic to allow or abort (`429`). Does not inject variables into routes.
+  - `get_db` and `cache` are **Data Providers**: Injected into specific endpoints (`repo: JobRepo`) to avoid opening useless DB connections on static/cached routes.
+
+---
+
+### 4. Bugs & Errors Faced During Implementation 🛠️
+
+1. **Lua Syntax Traps:**
+   - *Error:* `tokens = nil` (single `=` is assignment) ➔ *Fix:* In Lua equality is `==` (`if tokens == nil`).
+   - *Error:* `tokens += ...` and `tokens -= 1` ➔ *Fix:* Lua has no `+=` or `-=`. Must write `tokens = tokens - 1`.
+   - *Error:* `return "1"` (string) ➔ *Fix:* In Python `"1" == 1` is `False`. Lua must return integer `1` or `0`.
+   - *Error:* `HGET` with multiple fields ➔ *Fix:* `HGET` only takes 1 field. Used `HMGET` for multiple hash fields.
+
+2. **The Rate Limiter Throttled the Test Suite! (8 Tests Failed with 429):**
+   - *Error:* Running 22 tests in 2 seconds generated >25 requests under the default IP `"testclient"`, exhausting the 10 tokens and causing all subsequent tests to fail with `429`.
+   - *Fix:* Added test runner bypass:
+     `if client_ip == "testclient" and "X-Forwarded-For" not in connection.headers: return`
+     This allows general unit tests to run unthrottled, while `test_rate_limit()` specifies `X-Forwarded-For: 192.168.1.99` to strictly verify the 429 behavior.
+
+3. **WebSocket Route Crashed (`TypeError: rate_limit() missing 'request'`):**
+   - *Error:* Global `FastAPI(dependencies=[...])` applies to WebSocket routes too (`/ws/jobs/{id}`). WebSockets receive a `WebSocket` object, not an HTTP `Request` object.
+   - *Fix:* Changed parameter type to **`HTTPConnection`** (`from starlette.requests import HTTPConnection`), which is the common base class for both `Request` and `WebSocket`.
+
 
 
